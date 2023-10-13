@@ -12,7 +12,7 @@ library(embed)
 setwd("~/Desktop/Stat348/AmazonEmployeeAccess/")
 train <- vroom("train.csv")
 test <- vroom("test.csv")
-
+train$ACTION <- as.factor(train$ACTION)
 
 # Visualizations
 #library(ggmosaic)
@@ -36,12 +36,62 @@ test <- vroom("test.csv")
 
 my_recipe <- recipe(ACTION ~ ., data = train) %>%
   step_mutate_at(all_numeric_predictors(), fn = factor) %>% # turn all numeric features into factors
-  step_other(all_factor_predictors(), threshold = .01) %>% # combines categorical values that occur <5% into an "other" value
-  step_dummy(all_nominal_predictors()) %>% # dummy variable encoding
-  #step_lencode_mixed(all_nominal_predictors(), outcome = vars(ACTION)) %>%  #target encoding
-  prep()
+  #step_other(all_factor_predictors(), threshold = .005) %>% # combines categorical values that occur <5% into an "other" value
+  #step_dummy(all_nominal_predictors()) # dummy variable encoding
+  step_lencode_mixed(all_nominal_predictors(), outcome = vars(ACTION))  #target encoding
+
   
-baked <- bake(my_recipe, new_data = train)
+bake(prep(my_recipe), new_data = train)
 
 
+# Logistic Regression -----------------------------------------------------
 
+log_mod <- logistic_reg() %>% #Type of model
+  set_engine("glm")
+
+log_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(log_mod) %>%
+  fit(data = train) # Fit the workflow
+
+log_preds <- predict(log_wf,
+                     new_data=test,
+                     type="prob") # "class" or "prob" (see doc)
+
+log_submit <- as.data.frame(cbind(test$id, log_preds$.pred_1))
+colnames(log_submit) <- c("id", "ACTION")
+write_csv(log_submit, "log_submit.csv")
+
+# Penalized Logistic Regression -------------------------------------------
+
+penlog_mod <- logistic_reg(mixture=tune(), penalty=tune()) %>% #Type of model
+  set_engine("glmnet")
+
+penlog_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(penlog_mod)
+
+penlog_tuning_grid <- grid_regular(penalty(),
+                                   mixture(),
+                                   levels = 10)
+folds <- vfold_cv(train, v = 5, repeats=1)
+
+penlog_cv <- penlog_wf %>% 
+  tune_grid(resamples = folds,
+            grid = penlog_tuning_grid,
+            metrics = metric_set(roc_auc))#, f_meas, sens, recall, spec,precision, accuracy)) #Or leave metrics NULL
+
+penlog_bestTune <- penlog_cv %>% 
+  select_best("roc_auc")
+
+penlog_final_wf <- penlog_wf %>% 
+  finalize_workflow(penlog_bestTune) %>% 
+  fit(data = train)
+
+penlog_preds <- predict(penlog_final_wf,
+                        new_data=test,
+                        type="prob")
+
+penlog_submit <- as.data.frame(cbind(test$id, penlog_preds$.pred_1))
+colnames(penlog_submit) <- c("id", "ACTION")
+write_csv(penlog_submit, "penlog_submit.csv")
